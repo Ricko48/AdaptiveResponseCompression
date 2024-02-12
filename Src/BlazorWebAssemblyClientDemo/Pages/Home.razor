@@ -1,0 +1,233 @@
+﻿@page "/"
+@using System.Diagnostics
+@using System.Net.Http.Headers
+@using AdaptiveResponseCompression.Client.HttpClients.Interfaces
+@using AdaptiveResponseCompression.Client.Options
+@using AdaptiveResponseCompression.Client.Services.Interfaces
+@using Microsoft.Extensions.Options
+
+@inject IAdaptiveCompressionClient AdaptiveClient;
+@inject IBandwidthService BandwidthService;
+@inject IJSRuntime Js;
+@inject IOptions<AdaptiveCompressionOptions> Options;
+
+<PageTitle>Home</PageTitle>
+
+<h1>Adaptive Response Compression Demo</h1>
+<br />
+<br />
+<p>Do not forget to limit your bandwidth to fully see the effectiveness of the Adaptive Response Compression!</p>
+<br />
+<br />
+<h3>Bandwidth estimation</h3>
+<br />
+<button class="btn btn-primary" @onclick="EstimateBandwidthAsync">Estimate bandwidth</button>
+<br />
+<br />
+<p role="status">@_bandwidthLabel</p>
+<br />
+<br />
+<br />
+<p>Select size of the file to be downloaded</p>
+<select @bind="_selectedFileSize">
+    @foreach (var fileSize in TestData.FileSizes)
+    {
+        <option value="@fileSize">@fileSize</option>
+    }
+</select>
+<br />
+<br />
+<br />
+<h3>Adaptive Response Compression</h3>
+<br />
+<p>(First request might take a little bit longer because of the initial DNS resolution)</p>
+<br />
+<button class="btn btn-primary" @onclick="DownloadFileAdaptiveCompressionAsync">Download file using adaptive response compression</button>
+<br />
+<br />
+<p role="status">@_adaptiveLabel</p>
+<br />
+<br/>
+<br />
+<h3>Standard Response Compression</h3>
+<br />
+<p>(First request might take a little bit longer because of the initial DNS resolution)</p>
+<br />
+<button class="btn btn-primary" @onclick="DownloadFileStandardCompressionAsync">Download file using standard response compression</button>
+<br />
+<br />
+<p role="status">@_standardLabel</p>
+
+
+
+@code {
+    private string _bandwidthLabel = "Not estimated yet...";
+
+    private string _adaptiveLabel = "Not downloaded yet...";
+
+    private string _standardLabel = "Not downloaded yet...";
+
+    private string _selectedFileSize = TestData.FileSizes[8]; // 1MB
+
+    private bool _isSendingRequest;
+
+    private readonly TimeSpan _timeout = TimeSpan.FromMinutes(10);
+
+    private readonly HttpClient _client = new();
+
+    private AdaptiveCompressionOptions _options = null!;
+
+    protected override async Task OnInitializedAsync()
+    {
+        var bandwidth = await BandwidthService.GetBandwidthForHostAsync(Config.Host);
+        if (bandwidth != null)
+        {
+            _bandwidthLabel = $"Download bandwidth: {(double)((long)(bandwidth / 1024 * 1000 * 100)) / 100} KB/s";
+        }
+
+        _client.Timeout = _timeout;
+        _options = Options.Value;
+    }
+
+    private async Task EstimateBandwidthAsync()
+    {
+        if (_isSendingRequest)
+        {
+            await Js.InvokeVoidAsync("alert", "Wait for the already running request to finish.");
+            return;
+        }
+
+        _isSendingRequest = true;
+
+        _bandwidthLabel = $"Estimating bandwidth using '{_options.BandwidthAccuracy.ToString()}' accuracy...";
+        StateHasChanged();
+
+        try
+        {
+            var bandwidth = await BandwidthService.UpdateBandwidthForHostAsync(Config.Host);
+            _bandwidthLabel = $"Download bandwidth: {(double)((long)(bandwidth / 1024 * 1000 * 100)) / 100} KB/s";
+        }
+        catch (Exception ex)
+        {
+            await Js.InvokeVoidAsync("alert", $"Error: {ex.Message}");
+            _bandwidthLabel = "Error...";
+            return;
+        }
+        finally
+        {
+            _isSendingRequest = false;
+            StateHasChanged();
+        }
+    }
+
+    private async Task DownloadFileAdaptiveCompressionAsync()
+    {
+        if (_isSendingRequest)
+        {
+            await Js.InvokeVoidAsync("alert", "Wait for the already running request to finish.");
+            return;
+        }
+
+        _isSendingRequest = true;
+
+        if (await BandwidthService.GetBandwidthForHostAsync(Config.Host) == null)
+        {
+            await Js.InvokeVoidAsync("alert", "Adaptive compression will not be triggered because download bandwidth was not estimated yet. Standard compression will be used instead.");
+        }
+
+        _adaptiveLabel = "Sending...";
+        StateHasChanged();
+
+        var request = GetRequestMessage();
+
+        HttpResponseMessage? response = null;
+
+        try
+        {
+            var stopwatch = Stopwatch.StartNew();
+            response = await AdaptiveClient.SendAsync(request, _timeout);
+            stopwatch.Stop();
+
+            _adaptiveLabel = $"Latency: {stopwatch.ElapsedMilliseconds} ms";
+
+            response.EnsureSuccessStatusCode();
+        }
+        catch (Exception ex)
+        {
+            await Js.InvokeVoidAsync("alert", $"Error: {ex.Message}");
+            _adaptiveLabel = "Error...";
+            return;
+        }
+        finally
+        {
+            _isSendingRequest = false;
+            StateHasChanged();
+        }
+
+        response?.Dispose();
+    }
+
+    private async Task DownloadFileStandardCompressionAsync()
+    {
+        if (_isSendingRequest)
+        {
+            await Js.InvokeVoidAsync("alert", "Wait for the already running request to finish.");
+            return;
+        }
+
+        _isSendingRequest = true;
+
+        _standardLabel = "Sending...";
+        StateHasChanged();
+
+        var request = GetRequestMessage();
+
+        HttpResponseMessage? response = null;
+
+        try
+        {
+            var stopwatch = Stopwatch.StartNew();
+            response = await _client.SendAsync(request);
+            stopwatch.Stop();
+            
+            _standardLabel = $"Latency: {stopwatch.ElapsedMilliseconds} ms";
+
+            response.EnsureSuccessStatusCode();
+        }
+        catch (Exception ex)
+        {
+            await Js.InvokeVoidAsync("alert", $"Error: {ex.Message}");
+            _standardLabel = "Error...";
+            return;
+        }
+        finally
+        {
+            _isSendingRequest = false;
+            StateHasChanged();
+        }
+
+        response?.Dispose();
+    }
+
+    private HttpRequestMessage GetRequestMessage()
+    {
+        var builder = new UriBuilder(Config.Host)
+        {
+                Path = $"api/testData/json/{_selectedFileSize}"
+        };
+
+        var message = new HttpRequestMessage(HttpMethod.Get, builder.Uri);
+
+        // disables cache to get relevant results
+        message.Headers.CacheControl = new CacheControlHeaderValue
+        {
+            NoCache = true,
+            NoStore = true,
+            MustRevalidate = true
+        };
+
+        message.Headers.Pragma.ParseAdd("no-cache");
+
+        return message;
+    }
+}
